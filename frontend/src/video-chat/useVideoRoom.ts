@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Channel, Socket } from "phoenix"
-import type { SignalPayload } from "./types"
+import type { ChatMessage, SignalPayload } from "./types"
 import {
   fallbackIceServers,
   newPeerId,
@@ -10,6 +10,7 @@ import {
 
 export function useVideoRoom() {
   const [roomId, setRoomId] = React.useState("demo")
+  const [displayName, setDisplayName] = React.useState("")
   const [joined, setJoined] = React.useState(false)
   const [joining, setJoining] = React.useState(false)
   const [iceReady, setIceReady] = React.useState(false)
@@ -19,6 +20,8 @@ export function useVideoRoom() {
   const [selfId, setSelfId] = React.useState<string | null>(null)
   const [remoteStreams, setRemoteStreams] = React.useState<Record<string, MediaStream>>({})
   const [peerStatuses, setPeerStatuses] = React.useState<Record<string, string>>({})
+  const [peerDisplayNames, setPeerDisplayNames] = React.useState<Record<string, string>>({})
+  const [chatMessages, setChatMessages] = React.useState<ChatMessage[]>([])
   const selfIdRef = React.useRef<string | null>(null)
   const rtcConfigRef = React.useRef<RTCConfiguration>({ iceServers: fallbackIceServers })
   const localStreamRef = React.useRef<MediaStream | null>(null)
@@ -66,6 +69,12 @@ export function useVideoRoom() {
       return next
     })
     setPeerStatuses((prev) => {
+      if (!(peerId in prev)) return prev
+      const next = { ...prev }
+      delete next[peerId]
+      return next
+    })
+    setPeerDisplayNames((prev) => {
       if (!(peerId in prev)) return prev
       const next = { ...prev }
       delete next[peerId]
@@ -234,6 +243,8 @@ export function useVideoRoom() {
     pendingCandidatesRef.current.clear()
     setRemoteStreams({})
     setPeerStatuses({})
+    setPeerDisplayNames({})
+    setChatMessages([])
     setJoined(false)
     setJoining(false)
   }, [cleanupPeer])
@@ -255,6 +266,16 @@ export function useVideoRoom() {
       return
     }
 
+    const nameTrimmed = displayName.trim()
+    if (nameTrimmed.length < 1 || nameTrimmed.length > 40) {
+      setError("Display name must be 1–40 characters.")
+      setJoining(false)
+      return
+    }
+
+    setChatMessages([])
+    setPeerDisplayNames({})
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -271,22 +292,43 @@ export function useVideoRoom() {
       socket.connect()
 
       const topic = `room:${trimmed}`
-      const channel = socket.channel(topic, { peer_id: peerId })
+      const channel = socket.channel(topic, { peer_id: peerId, display_name: nameTrimmed })
       channelRef.current = channel
 
       channel.on("peers", (payload: unknown) => {
-        const msg = payload as { ids?: string[] }
-        const ids = msg.ids ?? []
-        for (const id of ids) {
-          if (id === peerId) continue
-          void sendOffer(id)
+        const msg = payload as {
+          peers?: { peer_id: string; display_name?: string }[]
+          ids?: string[]
+        }
+        if (Array.isArray(msg.peers)) {
+          setPeerDisplayNames((prev) => {
+            const next = { ...prev }
+            for (const p of msg.peers ?? []) {
+              if (p.peer_id && typeof p.display_name === "string" && p.display_name.trim() !== "") {
+                next[p.peer_id] = p.display_name.trim()
+              }
+            }
+            return next
+          })
+          for (const p of msg.peers ?? []) {
+            if (p.peer_id && p.peer_id !== peerId) void sendOffer(p.peer_id)
+          }
+        } else {
+          const ids = msg.ids ?? []
+          for (const id of ids) {
+            if (id === peerId) continue
+            void sendOffer(id)
+          }
         }
       })
 
       channel.on("peer_joined", (payload: unknown) => {
-        const msg = payload as { peer_id?: string }
+        const msg = payload as { peer_id?: string; display_name?: string }
         const id = msg.peer_id
         if (!id || id === peerId) return
+        if (typeof msg.display_name === "string" && msg.display_name.trim() !== "") {
+          setPeerDisplayNames((prev) => ({ ...prev, [id]: msg.display_name!.trim() }))
+        }
         void sendOffer(id)
       })
 
@@ -299,6 +341,30 @@ export function useVideoRoom() {
 
       channel.on("signal", (msg: unknown) => {
         void handleSignal(msg as SignalPayload)
+      })
+
+      channel.on("chat_msg", (payload: unknown) => {
+        const msg = payload as Record<string, unknown>
+        if (
+          typeof msg.id === "string" &&
+          typeof msg.peer_id === "string" &&
+          typeof msg.body === "string" &&
+          typeof msg.sent_at === "number" &&
+          typeof msg.display_name === "string"
+        ) {
+          const row: ChatMessage = {
+            id: msg.id,
+            peer_id: msg.peer_id,
+            display_name: msg.display_name,
+            body: msg.body,
+            sent_at: msg.sent_at,
+          }
+          setPeerDisplayNames((prev) => ({ ...prev, [row.peer_id]: row.display_name }))
+          setChatMessages((prev) => {
+            const next = [...prev, row]
+            return next.length > 500 ? next.slice(-500) : next
+          })
+        }
       })
 
       await new Promise<void>((resolve, reject) => {
@@ -316,7 +382,7 @@ export function useVideoRoom() {
     } finally {
       setJoining(false)
     }
-  }, [cleanupPeer, handleSignal, leave, roomId, sendOffer])
+  }, [cleanupPeer, displayName, handleSignal, leave, roomId, sendOffer])
 
   React.useEffect(() => {
     const local = localStreamRef.current
@@ -344,12 +410,24 @@ export function useVideoRoom() {
     }
   }, [joined])
 
+  const sendChat = React.useCallback((body: string) => {
+    const ch = channelRef.current
+    if (!ch) return
+    const trimmed = body.trim()
+    if (!trimmed) return
+    ch.push("chat_msg", { body: trimmed }, 10_000).receive("error", () => {
+      /* invalid / empty / too long — server did not broadcast */
+    })
+  }, [])
+
   const remoteEntries = Object.entries(remoteStreams) as [string, MediaStream][]
-  const joinBlocked = joining || (!joined && !iceReady)
+  const joinBlocked = joining || (!joined && !iceReady) || (!joined && displayName.trim().length === 0)
 
   return {
     roomId,
     setRoomId,
+    displayName,
+    setDisplayName,
     joined,
     joining,
     iceReady,
@@ -361,6 +439,9 @@ export function useVideoRoom() {
     selfId,
     remoteEntries,
     peerStatuses,
+    peerDisplayNames,
+    chatMessages,
+    sendChat,
     joinBlocked,
     join,
     leave,

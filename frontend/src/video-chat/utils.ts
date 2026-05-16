@@ -24,6 +24,10 @@ export function shortPeerId(id: string): string {
   return `${id.slice(0, 8)}…${id.slice(-4)}`
 }
 
+export function formatChatTime(sentAtMs: number): string {
+  return new Date(sentAtMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+}
+
 export function badgeColors(status: string): { bg: string; color: string; borderColor: string } {
   const s = status.toLowerCase()
   if (s.includes("failed") || (s.includes("disconnected") && !s.includes("connecting"))) {

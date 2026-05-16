@@ -7,9 +7,11 @@ import { WaitingForPeers } from "./WaitingForPeers"
 export function VideoGallery(props: {
   joined: boolean
   selfId: string | null
+  localDisplayName: string
   localVideoRef: React.MutableRefObject<HTMLVideoElement | null>
   remoteEntries: [string, MediaStream][]
   peerStatuses: Record<string, string>
+  peerDisplayNames: Record<string, string>
   roomId: string
 }): React.ReactElement {
   return (
@@ -19,11 +21,17 @@ export function VideoGallery(props: {
           Video
         </Text>
         <XStack flexWrap="wrap" gap="$3">
-          <LocalPreviewCard joined={props.joined} selfId={props.selfId} localVideoRef={props.localVideoRef} />
+          <LocalPreviewCard
+            joined={props.joined}
+            selfId={props.selfId}
+            localDisplayName={props.localDisplayName}
+            localVideoRef={props.localVideoRef}
+          />
           {props.remoteEntries.map(([peerId, stream]) => (
             <RemoteParticipantCard
               key={peerId}
               peerId={peerId}
+              displayName={props.peerDisplayNames[peerId] ?? ""}
               stream={stream}
               statusLabel={props.peerStatuses[peerId] ?? "Connecting…"}
             />
